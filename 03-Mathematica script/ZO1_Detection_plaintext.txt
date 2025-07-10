@@ -1,0 +1,740 @@
+ZO-1 - Detection
+*    Author: Jahn, Johannes
+*    Date: 03/2025
+*    Code version: 1.0.0
+*   E-Mail: Johannes.Jahn@uniklinik-freiburg.de 
+Change log
+v7
+- preparation for publication
+Initializing
+In[1]:= (*Main function*)
+
+zoAnalysis[filePath_,filePathGFP_,gfp_,formAnalysis_,sBranch_,segFolder_]:=Module[{imgproc,prun1,endPoints,pixel,subsetLength,subSteps,branchRec4, branchRec5,skeleton,smoothEdges, skeleton2,prun2,diffmask,componentsPrunned,pixelValueMask,numberMaskComponents,dispatchTable,mask,cellComponents,cellComponentsColored,cellComponentsSmooth,cellComponentsSmoothColored,pattern2,data,dataSmooth,parentfolder,fileName1,fileName2,fileName3,imgGFP,gfpCellNumbers,gfpBool,data2,overlayGFP,sorting1,dataMerged,rIndex,bp,bp2,bpBoth,branchesRiffled,branchesSmooth,selectedCellsImage,messRiffled,messSmooth, combinations,dataMergedBranches,rIndexSubsegment,neighbourNumbers,dataMergedBranches2,dataMergedBranches3,cellGenotype,dataMergedBranches4, datacal1, head1,subhead,tableData1,datacal2, head2,tableData2,measure,singleObjectMatrix,singleObjectColored,overlayCellNumbers,branchesRiffledSelected,overlaySingleBranch,overlayRiffleRound,overlayRIndex ,failure,thres2,imageGFP,imageNon,fiberDataAdvanced,dataMergedBranches5},
+
+(*Import and branch reconstruction*)
+(*functions for better memory management, will help when processing very large images on slower machines*)
+$HistoryLength=0;
+Share[];
+ClearSystemCache[];
+
+(*import and adjust the segmented image created by the U-Net (16bit input)*)
+imgproc=ImageAdjust[Import[filePath]];
+
+(* delete small objects, mostly background noise*)
+imgproc= DeleteSmallComponents[imgproc,Method->"Mean"];
+
+(* The segmented cell borders can vary in the width. With Thinning we reduce all to a one-pixel wide line (makes it easy to work with at later modelling steps).
+SkeletonTransform doesn\.b4t work quite well with Pruning, therefore we use Thinning*)
+prun1=Binarize[Thinning[imgproc],0];
+
+(*delete small branches/segments that extend into completely segmented cells*)
+prun1=Pruning[prun1, 10];
+
+(* next steps: fill small gaps (few pixels) in the detected branches/cell border segments; will result in more detectable cells since small gaps will not dismiss the whole cell.*)
+(*generate an image with all endpoints and get their coordinates*)
+endPoints =MorphologicalTransform[prun1, "EndPoints"];
+pixel=PixelValuePositions[endPoints, 1];
+
+(*number of all possible combinations*)
+subsetLength=(Length[pixel]*(Length[pixel]-1))/2;
+
+(*calls a helper function for branch reconstruction. This function will analyse all possible connections between the end points und returns a list of end points with a short distance between them. Calling the function in smaller parts (100.000 in each function call) will reduce memory load*)
+subSteps=Prepend[{subsetLength},Table[k,{k,1,subsetLength,100000}]]//Flatten;
+branchRec4=Flatten[Table[branchRec[pixel,subSteps[[i]],subSteps[[i+1]]],{i,1,Length[subSteps]-1}],1];
+
+(*draws a white line between the endpoints that are close together. branchRec5 is an Image-object, so the lines are drawn on the image, Thinning and Pruning must be repeated*)
+branchRec5= Binarize[Show[{imgproc,Graphics[{Thickness[0.003],White,Line@branchRec4}]},ImageSize-> ImageDimensions[imgproc]]];
+
+(*memory management functions*)
+ClearAll[imgproc,prun1, endPoints,pixel,branchRec4];
+ClearSystemCache[];
+
+(*Skeleton construction*)
+
+(* on the reconstruced branch image again the Thinning and Pruning is aplied (same as above)*)
+skeleton=Thinning[branchRec5];
+skeleton=Pruning[skeleton, 10];
+
+(*the riffle pattern of the cell borders is smoothed - this is the key feature for later calculation of the R-Index that is a marker for cell border riffle strength.
+https://mathematica.stackexchange.com/questions/149661/how-to-get-a-smooth-ridge-from-a-binary-image/149664; (website last visited: 11. Nov 2021 - 3:26 p.m.)*)
+smoothEdges = ImageAdjust[skeleton~Blur~12~Erosion~3~RidgeFilter~3];
+
+(*Thinning and Pruning is also applied to the smooth image*)
+skeleton2 = Thinning[Binarize[smoothEdges]];
+skeleton2=Pruning[skeleton2, 15];
+
+(*memory management functions*)
+ClearAll[smoothEdges,branchRec5];
+ClearSystemCache[];
+
+(*Diffmask construction*)
+
+(*in the next steps the so called (diff-)mask is constructed. This mask contains the information about incorrectly segmented areas and incompletely segmented and detected cells. This mask is later used to exclude these image parts and cells*)
+
+(*pruning is time consuming, 20 pixel is enough to gather enough information*)
+prun2=Pruning[skeleton, {20}];
+
+(*background: when the cell border of one cell is entirely segmented we get no holes/end points in this section. When endpoints exist (that are detected via the Pruning step before) this indicates a hole in the mesh of cell borders. Accordingly, the difference between the starting image and prun2 represents branches of incorrect segmented areas and incomplete segmented cells*)
+diffmask= skeleton - prun2;
+
+(*use the MorpholocialComponents function to detect the single cell objects in the prunned image, CornerNeighbhors is important to separate the individual cells*)
+componentsPrunned=MorphologicalComponents[ColorNegate[prun2],CornerNeighbors->False];
+
+(*get the pixels from the trimmed branches*)
+pixelValueMask=PixelValuePositions[diffmask,1];
+
+(*since we work on a component image PixelValue returns the exact number of each component, that has an "underlaying" trimmed branch, therefore is part of an incorrectly detected area*)
+numberMaskComponents=Round[DeleteDuplicates[PixelValue[Image[componentsPrunned],pixelValueMask]]];
+
+(*build a dispatch table. Components that were classified as a part of an incorrectly detected area in the step before, are set to "1", otherwise "0". Black parts that got the notation "0" before stay the same *)
+dispatchTable=Table[{i->If[MemberQ[numberMaskComponents,i],1,0]},{i,1,Max[componentsPrunned]}];
+dispatchTable=Prepend[dispatchTable, {0->0}]//Flatten;
+
+(*create mask based on the dispatch table; the mask will later be used to delete the incorrectly detected objects in the actual image*)
+mask=Binarize[Image[componentsPrunned/.Dispatch[dispatchTable]],0];
+
+(*memory management functions*)
+ClearAll[prun2,diffmask,pixelValueMask,componentsPrunned,dispatchTable];
+ClearSystemCache[];
+
+(*Cell object detection*)
+
+(*convert the segmented image into the single cell objects and remove small and false detected objects*)
+
+(*use the MorpholocialComponents function to detect the single cell objects in the segmented, preprocessed image, CornerNeighbhors is important to separate the individual cells*)
+cellComponents=MorphologicalComponents[ColorNegate[skeleton],CornerNeighbors->False];
+
+(*the helper function is used to delete objects smaller than 2500 pixels. Implemented via helper function since it showed better performance on large images compared to the generic Mathematica function.*)
+cellComponents =selectComps[cellComponents,2500];
+
+(*the previously generated mask is used to exclude incorrectly segmented parts and cells in the image. Again, a helper function is used that is based on a matrix implementation for performance reasons, especially on large image*)
+cellComponents=computeComponentDiff[cellComponents,mask,0.1];
+
+(*cells/objects that touch the image border (=incomplete cells) are excluded*)
+cellComponents=SelectComponents[cellComponents,#AdjacentBorderCount==0&];
+
+(*since we might have removed a few objects in the steps before the component numbering is off. With converting into an image and again applieng the MorphologicalComponents function the numbering is reseted*)
+cellComponents =MorphologicalComponents[Image[cellComponents],CornerNeighbors->False];
+
+(*create an image with colored cells*)
+cellComponentsColored=cellComponents//Colorize;
+
+(*same functions as above now for the smooth skeleton*)
+cellComponentsSmooth=MorphologicalComponents[ColorNegate[skeleton2],CornerNeighbors->False];
+cellComponentsSmooth =selectComps[cellComponentsSmooth,2500];
+cellComponentsSmooth=computeComponentDiff[cellComponentsSmooth,mask,0.1];
+cellComponentsSmooth=SelectComponents[cellComponentsSmooth,#AdjacentBorderCount==0&];
+cellComponentsSmooth =MorphologicalComponents[Image[cellComponentsSmooth],CornerNeighbors->False];
+cellComponentsSmoothColored=cellComponentsSmooth//Colorize;
+
+(*memory management functions*)
+ClearAll[mask];
+ClearSystemCache[];
+
+(*Measurement readout*)
+
+(*collect measurements for the components/cell objects*)
+data=ComponentMeasurements[cellComponents,{"Area","EquivalentDiskRadius","AreaRadiusCoverage","AuthalicRadius","OuterPerimeterCount","PerimeterLength","MeanCentroidDistance","MaxCentroidDistance","MinCentroidDistance","FilledCircularity","Rectangularity", "Medoid","PolygonalLength"}];
+
+(*delete list associations*)
+data=Join[{#[[1]]},#[[2]]]&/@data;
+
+(*multiply with the converting value: Thus, we get measured values in \[Micro]m; all values before were pixel values;
+values like FilledCircularity (between 0 and 1) are not changed*)
+convertFunction1[{a_,b_,c_,d_,e_,f_,g_,h_,i_,j_,k_,l_,m_,n_}]:={a,b*(pixelSize^2),c*pixelSize,d,e*pixelSize,f*pixelSize,g*pixelSize,h*pixelSize,i*pixelSize,j*pixelSize,k,l,m,n*pixelSize};
+data=Map[convertFunction1,data];
+
+(*collect measurements for the components/cell objects in the smoothed image. Here only PolygonalLength (for R-index calculation) and the Medoid (later used by the function componentSorting that matches the original and smooth cell objects)*)
+dataSmooth=ComponentMeasurements[cellComponentsSmooth,{"Medoid","PolygonalLength"}];
+dataSmooth=Join[{#[[1]]},#[[2]]]&/@dataSmooth;
+
+(*convert function is applied to change values from pixel \[Micro]m*)
+convertFunction2[{a_,b_,c_}]:={a,b,c*pixelSize};
+dataSmooth=Map[convertFunction2,dataSmooth];
+
+
+(*Generate folder names*)
+
+(*the stringReplace function deletes the segmented folder name and all afterwards parts of the filename. Thus, the new string is the path of the parent-folder, that contains all relevant subfolders*)
+parentfolder= StringReplace[filePath,segFolder~~___->""];
+
+(*for the new filenames the subfolder and original filename (without file extension) are added; at later steps short suffixes are added to these filenames*)
+fileName1=parentfolder<>"/processing/"<>FileBaseName[filePath];
+fileName2=parentfolder<>"/processing_overlay/"<>FileBaseName[filePath] ;
+fileName3=parentfolder<>"/processing_xlsx/"<>FileBaseName[filePath] ;
+
+(*if not existing the subfolders are created. In case of the overlay folder an old name was used in the previous scripts. When a folder with the old name is found, the name is changed to the new name *)
+If[DirectoryQ[parentfolder <>"/processing/"] == False, CreateDirectory[parentfolder <>"/processing/"]];
+If[DirectoryQ[parentfolder<>"/overlay_proc/"] == True && DirectoryQ[parentfolder<>"/processing_overlay/"] == False, RenameDirectory[parentfolder<>"/overlay_proc/",parentfolder<>"/processing_overlay/"]];
+If[DirectoryQ[parentfolder<>"/processing_overlay/"] == False,CreateDirectory[parentfolder <>"/processing_overlay/"]];
+If[DirectoryQ[parentfolder<>"/processing_xlsx/"] == False, CreateDirectory[parentfolder<>"/processing_xlsx/"]];
+
+
+(*the following part is only executed, if the image contains at least one cell object*)
+If[Length[data]>0 &&Length[dataSmooth]>0 ,
+(
+
+(*GFP processing*)
+
+If[gfp==True,
+(
+(*The GFP processing adds an additional parameter to each cell object: If the cell also emitted a GFP immunofluorescent signal. This can be used when mixing up two different genotypes in one preparation, one GFP-labelled. Now it can be reconstructed which cells belongs to which genotype.*)
+(*import the corresponding GFP image and binarize it; crop to correct image dimensions to reduce errors*)
+imgGFP = ImageCrop[MorphologicalBinarize[Import[filePathGFP]], ImageDimensions[cellComponentsColored]];
+
+(* all cells (respectively their label numbers) are selected that overlap more than 50% with the GFP image*)
+thres2=# >0.5&;
+gfpCellNumbers=Cases[ComponentMeasurements[{cellComponents ,imgGFP},"MeanIntensity"], HoldPattern[i_->v_]/;thres2[v]:>(i->0)];
+
+(*remove the second part of the list to only get the cell numbers*)
+gfpCellNumbers=gfpCellNumbers[[All,1]];
+
+(*build a new list with bool-values for each cell*)
+gfpBool=Table[MemberQ[gfpCellNumbers,i],{i,1,Length[data]}];
+
+(*add this list to the previously acquired data. Important: This step must be executed, before we start the componentSorting function (after that cell numbers don\.b4t match)
+https://mathematica.stackexchange.com/questions/47019/appending-element-to-sub-list
+(website last visited: 11. Nov 2021 - 3:28 p.m.)*)
+data2=Transpose@Append[Transpose@data,gfpBool];
+
+(*create a simple validation image by overlaying the detect cells and the GFP image*)
+overlayGFP = ImageCompose[ImageMultiply[Binarize[cellComponentsColored,0], White,3.0], {ImageMultiply[imgGFP, Red, 3.0], .5}];
+Export[fileName2<> "_gfp_overlay"<>".jpg",overlayGFP ,"JPEG","CompressionLevel"->0];
+),
+(
+(*placeholder added to the data table if the GFP processing is not executed*)
+data2=Append["no GFP data"]/@data;
+)
+];
+
+
+(*Building data-table part 1*)
+
+(*Problem: the original cell objects and the smooth cell objects have a different numbering. The called helper function uses the Medoid value of the objects and matches corresponding cells*)
+sorting1 = componentSorting[data,dataSmooth,13,2,15];
+
+(*combine the measurements of the corresponding components; only the "PolygonalLength" value from the smooth image is added*)
+dataMerged=Table[Append[data2[[sorting1[[i,1]]]],dataSmooth[[sorting1[[i,2]],3]]],{i,Length [sorting1]}];
+
+(*compute the R-index, the essential parameter in the ZO-1 model. The difference in cell perimeter compared is a marker for cell riffle larger differences mean stronger riffles*)
+rIndex=Table[(dataMerged[[i,14]]-dataMerged[[i,16]])/dataMerged[[i,14]]*100,{i,Length [dataMerged]}];
+
+(*the R-index is added to the data list, N is needed to get rid of the fraction*)
+dataMerged=Transpose@Append[Transpose@dataMerged,N[rIndex]];
+
+
+(*Single branch analysis*)
+
+If[sBranch==True,
+
+(*the single branch analysis grabs the skeleton image we got from U-NET and divides it into single parts. For each branch the corresponding branch in the smooth skeleton is selected. Both perimeters are used to calculate the R-index of this segment. The neighbour cell objects can be used to obtain genotype information via GFP signal, if available*)
+
+(*to divide our initial skeleton image, we grab the skeleton and all branch points. These are enlarged (2 Steps necessary to get them big enough). It\.b4s done for the round skeleton, too. The round branches can vary by 1-2 pixels, so, its safer to use both and add them. *)
+bp=MorphologicalBranchPoints[Binarize[skeleton]];
+bp=MorphologicalTransform[MorphologicalTransform[bp,Max],Max];
+bp2=MorphologicalBranchPoints[Binarize[skeleton2]];
+bp2=MorphologicalTransform[MorphologicalTransform[bp2,Max],Max];
+bpBoth=bp+bp2;
+
+(*next step is to subtract the branch points from our initial skeleton (works on binarized images). All single branches are converted into single components and colorized (should only be necessary for viewing not analysis). Only larger branches are selected, small ones can distract further analysis (e.g. component sorting). It done for the original and round skeleton*)
+branchesRiffled=skeleton-bpBoth;
+branchesRiffled=MorphologicalComponents[branchesRiffled]//Colorize;
+branchesRiffled=SelectComponents[branchesRiffled,#PerimeterLength >50&];
+branchesSmooth=skeleton2-bpBoth;
+branchesSmooth=MorphologicalComponents[branchesSmooth]//Colorize;
+branchesSmooth=SelectComponents[branchesSmooth,#PerimeterLength >50&];
+
+(*the relevant measurements are collect: Medoid is later used for aligning round and riffled branches. OuterPerimeterCount is used to calculate the riffle-Index (seems to be better than "PolygonalLength" on the single branches). List associations are removed.*)
+messRiffled=ComponentMeasurements[branchesRiffled,{"Medoid","OuterPerimeterCount"}];
+messRiffled=Join[{#[[1]]},#[[2]]]&/@messRiffled;
+messSmooth=ComponentMeasurements[branchesSmooth,{"Medoid","OuterPerimeterCount"}];
+messSmooth=Join[{#[[1]]},#[[2]]]&/@messSmooth;
+
+(*convert function is applied to change values from pixel \[Micro]m*)
+convertFunction3[{a_,b_,c_}]:={a,b,c*pixelSize};
+messRiffled=Map[convertFunction3,messRiffled];
+messSmooth=Map[convertFunction3,messSmooth];
+
+(*Problem: the riffled and smooth segment have a different numbering. The called helper function uses the Medoid value of the objects and matches corresponding segments/branches*)
+combinations=componentSorting[messRiffled,messSmooth,2,2,10];
+
+(*construct a merged data table with both smooth and riffled OuterPerimeterCount. Pair are selected based on the previous calculated combinations*)
+dataMergedBranches=Table[Append[messRiffled[[combinations[[i,1]]]],messSmooth[[combinations[[i,2]],3]]],{i,Length [combinations]}];
+
+(*compute the R-index, higher values mean larger riffles*)
+rIndexSubsegment=Table[(dataMergedBranches[[i,3]]-dataMergedBranches[[i,4]])/dataMergedBranches[[i,3]]*100,{i,Length [dataMergedBranches]}];
+
+(*the R-index is added to the data list, N is needed to get rid of the fraction*)
+dataMergedBranches=Transpose@Append[Transpose@dataMergedBranches,N[rIndexSubsegment]];
+
+(*in the next step for each segment the neighbour cell objects are determined. We only want to use segments that are part of a fully detected cell. Other segments might be incorrectly segmented by the U-Net and could potentially vary the overall measurements*)
+
+
+(*select only the cells, that are present in the data table. A few objects have no corresponding smooth object and are left out from the analysis and the data table (see componentSorting). The components need to converted to an image*)
+selectedCellsImage =Image[SelectComponents[cellComponents,MemberQ[dataMerged[[All,1]],#Label]&]];
+
+(*search for the neighbour cell objects of each segment/branch. This is done with another helper function*)
+neighbourNumbers=Table[neighbour[dataMergedBranches[[i,2]],selectedCellsImage ],{i,Length[dataMergedBranches]}];
+
+(*add the neighbour numbers at the end of the data table*)
+dataMergedBranches2=Transpose@Append[Transpose@dataMergedBranches,neighbourNumbers];
+
+(*only keep branches in the data table that have contact to 1 or 2 cell objects*)
+dataMergedBranches3 = Select[dataMergedBranches2,Length[#[[6]]]>0&];
+];
+
+
+(*When GFP and single branch processing is selected, both in the previous steps acquired information can be combined. For each branch the GFP status of the neighbour cells can be determined. With an additional helper function it\.b4s analysed if the cell border segmented bulges to one of the neighbour cells and if this cell is GFP positive or negative. This can help analyse the impact of different genotypes on the cytoskeleton.*)
+If[gfp== True && sBranch==True,
+(
+(*if we have GFP information, we can lookup if the neighbour cell for each branch is GFP true or false. First a association list is build that contains the GFP status for each cell number*)
+cellGenotype=Table[dataMerged[[i,1]]->dataMerged[[i,15]],{i,Length[dataMerged]}];
+
+(*with the association list the cell-neighbour-numbers of each branch are converted to GFP true/false*)
+cellGenotype=dataMergedBranches3[[All,6]] /. cellGenotype;
+
+(*this information is added to the data table*)
+dataMergedBranches4=Transpose@Append[Transpose@dataMergedBranches3,cellGenotype];
+
+(* The branchAnalysisGFP helper function needs two images, one showing only the GFP positive cells, the other showing the GFP negative cells. Both images are binarized*)
+imageGFP=Image[SelectComponents[cellComponents,MemberQ[Map[First,Select[dataMerged,#[[15]]==True&]],#Label]&]] ;
+imageNon=Image[SelectComponents[cellComponents,MemberQ[Map[First,Select[dataMerged,#[[15]]==False&]],#Label]&]] ;
+imageGFP=Binarize[imageGFP,0.01];
+imageNon=Binarize[imageNon,0.01];
+
+(*call the helper function that can retrieve information about the bulging of the branch/cell border segment.*)
+fiberDataAdvanced=Table[branchAnalysisGFP[i,dataMerged,dataMergedBranches4,branchesRiffled,selectedCellsImage,imageGFP,imageNon],{i,Length[dataMergedBranches4]}];
+
+(*add the newly computed measurements to the data table: "branch orientation based on the Centroid value","branch enclosed area", "pulled area"(when positive: pulled to the GFP+ cell, when negative pull to GFP negative cell*)
+dataMergedBranches4=Transpose@Append[Transpose@dataMergedBranches4,fiberDataAdvanced[[All,1]]];
+dataMergedBranches4=Transpose@Append[Transpose@dataMergedBranches4,Round[fiberDataAdvanced[[All,2]],0.01]];
+dataMergedBranches4=Transpose@Append[Transpose@dataMergedBranches4,Round[fiberDataAdvanced[[All,3]],0.01]];
+
+(*additionally, we can select all branches, that are corresponding to one cell object. The R-indices of all branches of each cell are added to the main data-table, values are rounded and the list is converted into a string (in excel lists of values are already saved as a string - converting at this point in the script might prevent formatting errors*)
+dataMerged=Transpose@Append[Transpose@dataMerged,Map[ToString,Round[Table[backSorting[dataMerged[[i,1]],dataMergedBranches4],{i,Length[dataMerged]}],0.01]]];
+)];
+
+If[gfp== False && sBranch==True,
+(
+(*when the additional GFP file does not exist, a placeholder is added to the single branch data table*)
+dataMergedBranches4=Append["No GFP"]/@dataMergedBranches3;
+
+(*all branches/segments being part of one cell can be selected and the R-indices are added to the main data-table, values are rounded and the list is converted into a string (in excel lists of values are already saved as a string - converting at this point in the script might prevent formatting errors*)
+dataMerged=Transpose@Append[Transpose@dataMerged,Map[ToString,Round[Table[backSorting[dataMerged[[i,1]],dataMergedBranches4],{i,Length[dataMerged]}],0.01]]];
+)];
+
+(*Building data-table part 2*)
+
+(*round the values to generate a nicer view in the excel file (more accuracy is not needed)*)
+dataMerged[[All,2;;3]]=Round[dataMerged[[All,2;;3]],0.01];
+dataMerged[[All,4]]=Round[dataMerged[[All,4]],0.001];
+dataMerged[[All,5;;9]]=Round[dataMerged[[All,5;;9]],0.01];
+dataMerged[[All,10;;12]]=Round[dataMerged[[All,10;;12]],0.001];
+dataMerged[[All,14]]=Round[dataMerged[[All,14]],0.01];
+dataMerged[[All,16;;17]]=Round[dataMerged[[All,16;;17]],0.01];
+
+(*create a summary line that will be part of the exported excel file. Total cell count is added at the begin of the list, followed by the mean values of the parameters. For a few parameters mean values can\.b4t be computed --> a placeholder is added; again, Round added for a nicer view of the results in the excel file*)   
+datacal1 = Join[List[Length[dataMerged]],Round[N[Mean[dataMerged[[All,2;;3]]]],0.01],Round[N[Mean[dataMerged[[All,4;;4]]]],0.001],Round[N[Mean[dataMerged[[All,5;;9]]]],0.01],Round[N[Mean[dataMerged[[All,10;;12]]]],0.001],List["NULL"],Round[N[Mean[dataMerged[[All,14;;14]]]],0.01],List["NULL"],Round[N[Mean[dataMerged[[All,16;;17]]]],0.01],List["NULL"] ];
+
+(*header and subhead text for the export file*)
+head1={"cell number","area [\[Micro]m\.b2]","equivalentDiskRadius [\[Micro]m]","areaRadiusCoverage","authalicRadius [\[Micro]m]","outerPerimeterCount [\[Micro]m]","perimeterLength [\[Micro]m]","meanCentroidDistance [\[Micro]m]","maxCentroidDistance [\[Micro]m]","minCentroidDistance [\[Micro]m]","filledCircularity","rectangularity","medoid","polygonalLength [\[Micro]m]","GFP","polygonalLength smooth [\[Micro]m]", "R-index", "single branch R-Index"};
+subhead={
+{"aggregated data - mean values"},
+{"single cell data"}
+};
+
+(*merges the final output table*)
+tableData1=Join[{head1},{subhead[[1]]},{datacal1},{subhead[[2]]},dataMerged];
+
+(*When the single branch setting is used a second export table is build*)
+If[sBranch==True ,
+
+(*round the values to generate a nicer view in the excel file (more accuracy is not needed)*)
+dataMergedBranches4[[All,3;;5]]=Round[dataMergedBranches4[[All,3;;5]],0.01];
+
+(*create the summary line that will be part of the exported excel file. Total number of segments is added at the begin of the list, followed by the mean values of the parameters. For a few parameters mean values can\.b4t be computed --> a placeholder is added*)   
+datacal2 = Join[List[Length[dataMergedBranches4]],List["NULL"],Round[N[Mean[dataMergedBranches4[[All,3;;5]]]],0.01],List["NULL"],List["NULL"] ];
+
+(*define header for the export file*)
+head2={"branch number","medoid","outerPerimeterCount [\[Micro]m]", "outerPerimeterCount smooth [\[Micro]m]","R-index","neighbour cell number", "GFP neighbour cell","branch orientation","branch enclosed area [\[Micro]m\.b2]","pulled area [\[Micro]m\.b2]"};
+
+(*merges the final output table*)
+tableData2=Join[{head2},{subhead[[1]]},{datacal2},{subhead[[2]]},dataMergedBranches4];
+];
+
+(*Form analysis*)
+
+If[formAnalysis==True,
+(
+(*a few essential measurements for each object are determined. The "map2"-image (matrix form) and NOT the coloured image is used*)
+measure = ComponentMeasurements[cellComponents,{"Area","Orientation","Length","Centroid"}];
+
+(*remove associations in the measure list*)
+measure=Join[{#[[1]]},#[[2]]]&/@measure;
+
+(*the orientation-values are radian and need to be converted to degrees values for the later processing steps. /Degree converts the radian values, Mod 180 converts all negatives values and values greater 180\[Degree] (we only want values between 0 and 179,99). The original values are replaced in the measure array*)
+measure[[All,3]] =  Mod[Round[measure[[All,3]]/Degree],180];
+
+(*each cell object is rotated and packed into a SparseArray (image data in matrix form)*)
+singleObjectMatrix= SparseArray[Table[rotateCrop[i,cellComponents,measure],{i,Length[measure]}]];
+
+(*for simple visualisation all cells are overlayed at the centre point. A heatmap colouring shows the overlapping parts*)
+singleObjectColored=ImageResize[changeColour[Total[singleObjectMatrix]],Scaled[3]];
+
+(*export the matrix file and visualisation*)
+Export[fileName3<> "_raw-matrix_fullcell"<>".mat",singleObjectMatrix,"MAT"];
+Export[fileName1<> "_form_analysis_fullcell"<>".jpg",singleObjectColored,"JPEG"];
+)
+];
+
+(*Export and overlay creation*)
+
+(*overlays the riffled and round skeleton; use ColorNegate to archive a black background*)
+overlayRiffleRound=ImageCompose[ImageMultiply[skeleton,White,3.0],{ImageMultiply[skeleton2,Red,3.0],.5}];
+
+(*overlays the detected cells and their corresponding riffle-index*)
+overlayRIndex =Show[Image[cellComponentsColored],Graphics[{White,Table[Inset[ToString[Round[dataMerged[[i,17]],0.1]],dataMerged[[i,13]]],{i,1,Length[dataMerged]}]}],ImageSize-> ImageDimensions[cellComponentsColored]];
+
+(*export functions for table-data and (overlay-)images*)
+Export[fileName3<>"_zo1.xlsx",tableData1,"XLSX"];
+Export[fileName1<> "_original"<>".jpg",overlayRIndex,"JPEG","CompressionLevel"->0];
+Export[fileName1<> "_round"<>".jpg",cellComponentsSmoothColored,"JPEG","CompressionLevel"->0];
+Export[fileName2<> "_overlay_riffle_round"<>".jpg",overlayRiffleRound,"JPEG","CompressionLevel"->0];
+
+If[sBranch ==True,
+
+(*this overlay is used below for overlaySingleBranch. It overlays the detected cells with their corresponding cell number*)
+overlayCellNumbers =Show[cellComponentsColored,Graphics[{White,Table[Inset[ToString[dataMerged[[i,1]]],dataMerged[[i,13]]],{i,1,Length[dataMerged]}]}],ImageSize-> ImageDimensions[cellComponentsColored]];
+
+(*this image is used below for overlaySingleBranch. It shows only the branches that we finally selected for measurements *)
+branchesRiffledSelected=SelectComponents[branchesRiffled,MemberQ[dataMergedBranches4[[All,1]],#Label]&];
+
+(*overlays the 2 previous images and shows the R-index for each branch*)
+overlaySingleBranch=Show[ImageCompose[overlayCellNumbers,ColorReplace[branchesRiffledSelected,Black->Transparent]],Graphics[{White,Table[Inset[ToString[Round[dataMergedBranches4[[i,5]],0.1]],dataMergedBranches4[[i,2]]],{i,1,Length[dataMergedBranches4]}]}]ImageSize-> ImageDimensions[overlayCellNumbers]];
+
+(*export the overlay and result table*)
+Export[fileName3<> "_branches"<>".xlsx",tableData2,"XLSX"];
+Export[fileName2<> "_single_branch"<>".jpg",overlaySingleBranch,"JPEG","CompressionLevel"->0];
+];
+
+),
+(
+(*if no cells are detected in the image, a text file is saved so that faulty images can be easily spotted in the output folder*)
+failure="No detectable cells in this Image";
+Export[fileName3<>"_zo1.txt",failure,"Text"]; 
+)
+];
+]
+
+In[2]:= (*Helper functions*)
+
+(*this helper function will analyse all possible connections between the endpoints and returns pair of points with short connections - these gaps are likely misdetections of the cell boarder and can be approximately reconnected*)
+branchRec[pixel_,i_,j_]:=Module[
+{branchRec1,branchRec2,branchRec3,branchRec4},
+
+(*pick all endpoint combinations in the range set by i and j *)
+branchRec1=Subsets[pixel,{2},{i,j}] ;
+
+(* compute the distance between the pair of points
+https://mathematica.stackexchange.com/questions/8272/calculating-the-distance-between-the-coordinates-in-a-list (website last visited: 11. Nov 2021 - 3:29 p.m.)*)
+branchRec2=EuclideanDistance@@@ branchRec1;
+
+(*the distance is added to the list with point-combinations and grouped to individual sub-lists, containing both the points and the distance*)
+branchRec3= Partition[Flatten[Riffle[branchRec1,branchRec2],1],3];
+
+(*short connections are selected, the threshold is set to around 2\[Micro]m*)
+branchRec3=Select[branchRec3,#[[3]]<Round[2/pixelSize]&];
+
+(*the distance is deleted from the list*)
+branchRec4=Drop[#,{3}]&/@branchRec3;
+
+(*return the endpoints*)
+branchRec4
+]
+
+(*helper function to select components in an image based on an area-threshold. Instead of using the build in function in Mathematica this one provides a performance benefit on large images because it uses a matrix representation of the image which showed better performance instead of using a large image object*)
+selectComps[image_,thres_]:=
+Module[{compMeasure,compMeasure2,dispatchTable,image2},
+
+(*gather the measurements for the area of all objects*)
+compMeasure=List @@@ ComponentMeasurements[image,"Area"];
+
+(*return the image, if the image is empty*)
+If[Length[compMeasure]==0,image,(
+
+(*select list elements/objects where the area is larger than the defined threshold. First returns the object number*)
+compMeasure2=First/@ Select[compMeasure,#[[2]]>thres&] ;
+
+(*build a dispatch table, were larger objects keep their number and smaller ones get the label "0" *)
+dispatchTable=Table[{i->If[MemberQ[compMeasure2,i],i,0]},{i,1,First[Last[compMeasure]]}];
+dispatchTable=Prepend[dispatchTable, {0->0}]//Flatten;
+
+(*apply the dispatch table onto the matrix*)
+image2=image/.Dispatch[dispatchTable];
+
+(*return the image matrix*)
+image2
+)]
+]
+
+(*helper function to remove objects in the image (map) that are included in the mask. By the given threshold the sensitivity can be adapted. Instead of using the build in function in Mathematica this one provides a performance benefit on large images because it uses a matrix representation of the image which showed better performance instead of using a large image object*)
+computeComponentDiff[map_,mask_,thres_] := Module[
+{mapMatrix,maskMatrix,max,countBefore,countAfter,countMerged,dispatchTable,map2},
+
+(*Flatten will remove the matrix structure; now all pixels are in one large list*)
+mapMatrix=Flatten[map];
+
+(*convert the image mask into matrix form, Flatten will convet the 2D form in 1D*)
+maskMatrix=Flatten[ImageData[mask]];
+
+(*get the highest object number*)
+max=Max[mapMatrix];
+
+(*BinCounts returns the number of pixels for each object, since every object has its own label/value in the list of pixel values.*)
+countBefore=BinCounts[mapMatrix,{1,max+1,1}];
+
+(*Pick will select the pixels in the image that have value "1" in our mask and therefore should be removed. Again, the total values of pixels are counted*)
+countAfter=BinCounts[Pick[mapMatrix,maskMatrix,1],{1,max+1,1}];
+
+(*zeros are replaced by "1" to avoid division by zero errors in the next step. This does not harm the results since the division results are way below the threshold*)
+countBefore = countBefore /.{0->1};
+countAfter = countAfter /.{0->1};
+
+(*Calculate the quotient of all pixels and pixels that are also included in the map*)
+countMerged=countAfter/countBefore//N;
+
+(*create a dispatch table that will remove all objects that overlap more than xx% (defined by the threshold variable) with the mask*)
+dispatchTable=Table[{i->If[countMerged[[i]]<thres,i,0]},{i,1,max}];
+dispatchTable=Prepend[dispatchTable, {0->0}]//Flatten;
+
+(*apply the dispatch table*)
+map2=map/.Dispatch[dispatchTable];
+
+(*return new image (matrix form)*)
+map2
+]
+
+(*this helper function selects corresponding components in two different images based on the Medoid values. This is necessary because the automatic numbering for two slightly different images doesn\.b4t match in all cases.*)
+componentSorting[data1_,data2_,col1_,col2_,thres_]:=
+Module[{centreCombinations,centreCombinations2,distanceCentre,dataList,tab1,tab2, list1,list2,finalCombination},
+
+(*gives a list with all possible combinations of the medoid values, the centre of the objects. col1 and col2 need the be predefined, these are the list pointers for the Medoid values in the data tables. After that Flatten the list*)
+centreCombinations= Tuples[{data1[[All,col1]],data2[[All,col2]]}];
+centreCombinations2= Flatten [centreCombinations,1];
+
+(*compute distance between the two centre points; similar to the branchRec-function*)
+distanceCentre=Table[EuclideanDistance[{centreCombinations2[[i]]},{centreCombinations2[[i+1]]}],{i,1,Length [centreCombinations2],2}];
+
+(*the distance is added to the list of medoid-combinations*)
+dataList= Partition[Flatten[Riffle[centreCombinations,distanceCentre],1],3];
+
+(*select the short connections. These ones are a matching component pair. The distance is deleted from the list*)
+dataList= Select[dataList,#[[3]]<thres&];
+dataList= Flatten[Drop[#,{3}]&/@dataList,1];
+
+(*create two association lists: Medoid --> number component *)
+tab1=Table[data1[[i,col1]]->data1[[i,1]],{i,Length[data1]}];
+tab2=Table[data2[[i,col2]]->data2[[i,1]],{i,Length[data2]}];
+
+(*replace medoid values with the component numbers; every 1,3,5 element corresponds to the original image medoid, 2,4,6... are the medoids in the smooth image *)
+list1=dataList[[1;;-1;;2]] /. tab1;
+list2=dataList[[2;;-1;;2]] /. tab2;
+
+(*create final pair*)
+finalCombination=Partition[Riffle[list1,list2],2];
+
+(*return the list of pair*)
+finalCombination
+]
+
+(*helper function that is used for single branch analysis. For a given medoid (from a cell border segment) it searches for cell component neighbour and returns their numbers*)
+neighbour[medoid_,componentImage_]:=
+Module[{kombi,neighbourPoints,neighbourCells},
+
+(*different variations of positions around the medoid*)
+kombi={{-2,-2},{-2,0},{-2,2},{0,-2},{0,0},{0,2},{2,-2},{2,0},{2,2}};
+
+(*build a list with all surrounding pixels based on the given medoid. Round is important, otherwise it gives scrambled results*)
+neighbourPoints=Table[Round[medoid]+kombi[[i]],{i,Length[kombi]}];
+
+(*Get the number of each component surrounding
+https://mathematica.stackexchange.com/questions/100513/finding-pixel-coordinates-from-morphological-components (website last visited: 11. Nov 2021 - 3:30 p.m.)*)
+neighbourCells=Table[PixelValue[componentImage, neighbourPoints[[i]]],{i,Length [neighbourPoints]}];
+
+(*Delete zeros and duplicates*)
+neighbourCells=DeleteDuplicates[DeleteCases[Round[neighbourCells],0]];
+
+(*return the list with neighbour cell numbers*)
+neighbourCells
+]
+
+(*this helper function provides modelling algorithms to determine if a segment is pulled by one specific neighbour cell/genotype*)
+branchAnalysisGFP[i_,dataNormal_,dataBranches_,branchesRiffled_,imageAllcells_,imageGFPcells_,imageNonGFPcells_]:=
+Module[{branch,centroidPos,centroidCell,expansionDirection,branchEnds,branchConnected,totalArea,areaOverlappedGFP,areaOverlappedNon,areaOverlappedDiff,listElement},
+
+(*this analysis only works on branches that have two different cell neighbours.*)
+If[dataBranches[[i,7]] == {False,True}|| dataBranches[[i,7]] == {True,False},
+{
+(*select the specific branch*)
+branch=SelectComponents[branchesRiffled,#Label==dataBranches[[i,1]] &];
+
+(*measure the centroid value of the branch object. Depending on the position of the centroid it can be determined in which direction the segment bulges*)
+centroidPos=List@@@ComponentMeasurements[branch,"Centroid"];
+
+(*get the pixel value/cell number of the cell where the centroid is located*)
+centroidCell=Round[PixelValue[imageAllcells,centroidPos[[1,2]]]];
+
+(*when no cell number is found (in case the centroid is between two cell objects) the centroidCell value is "0". An error message is deactivated because in the further steps no list element with pointer "0" is found and otherwise the error is displayed. The switch statement later will then correctly return "non distinguishable", so the error can be ignored*)
+Off[Part::partw];
+Off[Part::partd];
+
+(*decide which GFP value this cell has - know we can make a statement which genotype might pull on the segment*)
+listElement=Flatten[Select[dataNormal,#[[1]]==centroidCell&],1];
+expansionDirection=Switch[listElement[[15]],True,"non GFP cell pulls",False,"GFP cell pulls",_,"non distinguishable"];
+
+(*in a second part of the modelling the enclosed area is computed and overlapped with the cells. Depending which GFP/genotype has more overlapping area, again, we can decide which genotypes might pull on the segment*)
+
+(*first the endpoints of the branch are picked*)
+branchEnds=PixelValuePositions[MorphologicalTransform[Binarize[branch], "EndPoints"],1];
+
+(*the endpoints are connected with a thin line and converted in an object by using the watershed function. The other detected objects are removed*)
+branchConnected=Show[{branch,Graphics[{Thickness[0.001],White,Line@branchEnds}]},ImageSize-> ImageDimensions[branch]];
+branchConnected=WatershedComponents[branchConnected,Method->{"MinimumSaliency",0}];
+branchConnected=Binarize[SelectComponents[branchConnected,#AdjacentBorderCount==0&]//Colorize];
+
+(*measure the total number of pixels of this new object - the branch with enclosed area. Convert the pixel value into \[Micro]m*)
+totalArea=Total[List @@@ComponentMeasurements[branchConnected,"Count"]];
+totalArea=totalArea[[2]]*(pixelSize^2);
+
+(*look up how much area is overlapped with each GFP and non GFP cell*)
+areaOverlappedGFP=Length@ImageValuePositions[imageGFPcells+branchConnected,2]*(pixelSize^2);
+areaOverlappedNon=Length@ImageValuePositions[imageNonGFPcells+branchConnected,2]*(pixelSize^2);
+
+(*the difference from the enclosed areas is calculated. When the area is positive this means most of the enclosed area is overlapped with the non-GFP cell --> the border-segment is pulled by the GFP cell;
+when the area is negative this means most of the enclosed area is overlapped with the GFP cell --> the border-segment is pulled by the non-GPF cell*)
+areaOverlappedDiff=areaOverlappedNon-areaOverlappedGFP;
+
+(*return the results*)
+expansionDirection,totalArea,areaOverlappedDiff
+},
+{
+(*return placeholder results if branch has only 1 detected neighbour or both have the same genotype*)
+"Null",0,0
+}
+]
+]
+
+(*helper function that is used for single branch analysis. So far the data table only shows which neighbour cells belong to a segment. With this function the information is "swapped" - it identifies all branches that belong to one cell*)
+backSorting[cellCompNumber_,dataBranches_]:=
+Module[{branches},
+
+(*select all branches that are part of the cell component*)
+branches=Select[dataBranches,MemberQ[#[[6]],cellCompNumber]==True&];
+
+(*return all R-indices of these branches*)
+branches[[All,5]]
+]
+
+(*helper function that is used for form analysis: rotates each cell object by the given angle value
+Cave: values are hardcoded - when changing the ComponentMeasurements-function in the main part it might need adjustments to the list positions*)
+rotateCrop[x_,map_,measure_]:=
+Module[{rot1,rot2,rot3,max2,rotMeasure},
+
+(*select cell*)
+rot1=SelectComponents[map,#Label ==measure[[x,1]]&];
+
+(*create binarized image*)
+rot1=Binarize[Image[rot1,ColorSpace->"Grayscale"]];
+
+(*compute rough max elongation --> speeds up next step *)
+max2=measure[[x,4]]*2/3;
+
+(*trim image to smaller size*)
+rot2= ImageTrim[rot1,{measure[[x,5]]-max2,measure[[x,5]]+max2}, Padding->Black];
+
+(*rotate image/component*)
+rot2= ImageRotate[rot2,(180-measure[[x,3]]) Degree];
+
+(*compute new centroid value, delete list association*)
+rotMeasure=ComponentMeasurements[rot2,{"Centroid","Length"}];
+rotMeasure=Join[{#[[1]]},#[[2]]]&/@rotMeasure ;
+
+(*crop image to 500x500 pixel. The centroid of the cell is aligned in the image centre. Image is transformed into a matrix*)
+rot3= ImageData[ImageCrop[ImageTrim[rot2,{rotMeasure[[1,2]]-249.5,rotMeasure[[1,2]]+249.5}, Padding->Black],{500,500}]];
+
+(*return the image matrix*)
+rot3
+]
+
+(*helper function that is used for form analysis: Creates a heatmap coloured image with all cells overlapped; pixels that are shared by more cells get a stronger colour (red)*)
+changeColour[matrix_]:=
+Module[{colour,table1,table2,output},
+
+(*define colour function*)
+colour=ColorData["Rainbow"];
+
+(*lockup the RGB-colour for each label in the image,the highest label is in the centre where all cells are overlapped*)
+table1=Table[colour[i/Max[matrix]],{i,Max[matrix]}];
+
+(*build association table; #label --> new colour, RGB colour codes have 3 values*)
+table2=Table[{i->{table1[[i,1]],table1[[i,2]],table1[[i,3]]}},{i,Length[table1]}];
+
+(*black parts should stay black, but also RGB coded*)
+table2=Prepend[table2,{0->{0,0,0}}]//Flatten;
+
+(*replace each label number with the corresponding new colour; the new matrix has RGB coded pixels and can be converted back into an image. Normal is needed to make it work on the inputted SparseArrey *)
+output=Image[Normal[matrix]/.Dispatch[table2]];
+
+(*return image*)
+output
+]
+Run
+1. Quit all Mathematica kernels
+In[126]:= Quit[]
+2. Define settings
+In[11]:= (*define the folder name that contains the segmented ZO-1 images generated by U-Net*)
+(*default: "\\zo1_seg\\"*)
+segFolderZo1 ="\\zo1_seg\\";
+
+(*set to True if the GFP analysis function should be used, that can divide the cells into two groups based on the GFP signal. For each ZO-1 image a supplementary GFP image showing the same part of the preparation is necessary.  
+Cave: the number and alphabetic sorting of the segmented and GFP images need to be identical (which should be the case when processing both with the ImageJ script)*)
+(*default: False*)
+gfp=False;
+
+(*define the folder name that contains the additional GFP images*)
+(*default: "\\gfp\\"*)
+gfpFolder= "\\gfp\\";
+
+(*set to True if the single branch function should be used. With this function the cell border is divided into subsegments, that can be individually used for modelling and measurements. When combined with the GFP function it can be used to make a statement about the orientation of the cell border in favour of one of the genotypes*)
+(*default: False*)
+singleBranch=False;
+
+(*set to True if the form analysis function should be used*)
+(*default: False*)
+formAnalysis = False;
+
+(*The pixel size depends on the U-Net configuration used for training. It defines the size of 1 pixel in \[Micro]m*)
+(*default for ZO-1: 0.1024*)
+pixelSize=0.1024;
+
+3. Localisation of image files
+In[17]:= (*set working directory and search in all subfolders, matching the defined folder name, for image files *)
+SetDirectory[NotebookDirectory[]];
+files=FileNames["*.tif","", Infinity];
+filesZo1 = Select[files,StringMatchQ[#,__~~segFolderZo1~~__]&];
+filesGFP = Select[files,StringMatchQ[#,__~~gfpFolder~~__]&];
+fileNumberZo1 = Length[filesZo1];
+fileNumberGFP = Length[filesGFP];
+"Number of files: \nZO-1 segmented: "<>ToString[fileNumberZo1]<>"\nGFP: "<>ToString[fileNumberGFP ]
+If [fileNumberZo1 !=fileNumberGFP &&gfp==True,(gfp=False;"GFP-Processing deactivated: file numbers don\.b4t match. Please double check input files")]
+
+Out[23]= Number of files: 
+ZO-1 segmented: 108
+GFP: 0
+4. Processing
+In[25]:= (*side variables for ProgressIndicator*)
+counter=-1*Length[Kernels[]];
+SetSharedVariable[counter];
+
+(*call the main function to start the processing. A progress bar shows how many images are already processed. With ParallelTable we utilize more CPU cores. For large images or computers with less CPU power switch to the normal Table*)
+Monitor[ParallelTable[counter++;zoAnalysis[filesZo1 [[i]],If[gfp==True,filesGFP [[i]],{}],gfp,formAnalysis,singleBranch,segFolderZo1],{i,fileNumberZo1 }],ProgressIndicator[counter,{0,fileNumberZo1 }]];
