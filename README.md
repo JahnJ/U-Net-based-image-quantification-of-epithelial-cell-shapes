@@ -1,1 +1,1 @@
-# U-Net-based-image-quantification-of-epithelial-cell-shapes-
+# U-Net-based-image-quantification-of-epithelial-cell-shapes
