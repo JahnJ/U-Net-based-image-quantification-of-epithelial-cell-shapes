@@ -1,0 +1,437 @@
+ZO-1 - Visualisation
+*    Author: Jahn, Johannes
+*    Date: 03/2025
+*    Code version: 1.0.0
+*   E-Mail: Johannes.Jahn@uniklinik-freiburg.de 
+Change log
+v7
+- preparation for publication
+Initializing
+(*Load files*)
+
+(*this function loads the data of all xlsx-files located in the given folder. It returns a container with all relevant data for further processing*)
+loadFiles[folder_]:=
+Module[{subFolder,outputFolder,folderNames1,folderNames2,fileNames,fileCount,inputData,cellsPerFile,cellPerGenotype,selectionTable,dataContainer,enclosedAreaDiff},
+
+(*specify our working folder*)
+subFolder= NotebookDirectory[]<>folder;
+
+(*set the output-path and create output-folder, if not created before*)
+outputFolder=StringReplace[subFolder, "data_input"~~___->""]<>"data_output";
+If[DirectoryQ[outputFolder] == False, CreateDirectory[outputFolder]];
+
+(*get the names of all subfolders in the data_input folder. These names represent our genotypes/experimental settings, that we want to compare *)
+folderNames1= Select[FileNames["*",subFolder,Infinity],DirectoryQ];
+
+(*get a list with all filenames*)
+fileNames= Table[FileNames["*.xlsx",folderNames1[[i]]],{i,Length[folderNames1]}];
+
+(*delete the prepended path; now we only have the plain folder names/genotypes*)
+folderNames1 = StringReplace[folderNames1,___~~"data_input\\"->""];
+
+(*returns the number of files in each subfolder*)
+fileCount= Length /@fileNames;
+
+(*subfolders with less than 2 files are ignored - the following analysis function only works with 2 or more files;
+these subfolders are deleted in the folderNames, fileNames and fileCount lists *)
+folderNames2=Pick[folderNames1,#>1&/@fileCount];
+fileCount=DeleteCases[fileCount,Alternatives@@{0,1}];
+fileNames=Pick[fileNames,#>1&/@Length/@fileNames];
+
+If[folderNames2!={},(
+
+(*if a genotype folder was removed display an error message. File loading will continue without problems, when at least one genotype folder with 2 or more files exist*)
+If[folderNames2!=folderNames1,Print[subFolder <>": 1 or more genotype folders were removed from file loading: genotype folders with only 1 file are excluded!"];
+];
+
+(*remove nested list structure. Otherwise files can\.b4t be imported*)
+fileNames= fileNames//Flatten;
+
+(*import the content of all files*)
+inputData=Table[Import[fileNames[[i]],{"Data",1,All}],{i,Length[fileNames]}];
+
+(*sums up the number of cells of each genotype; -4 is needed the get rid of the label lines/summery line in the excel file; At first the number of cells in each file is counted, second we build a new nested list (all files are grouped by genotype), at last we return the total*)
+cellsPerFile=FoldPairList[TakeDrop,(Map[Length,inputData])-4,fileCount];
+cellPerGenotype=Map[Total,cellsPerFile];
+cellsPerFile=Flatten[cellsPerFile];
+
+(*the first line returns the heading of the data table, that contain the parameter names. Will later be used to name the output files*)
+selectionTable= inputData[[1,1]];
+
+(*drop the label lines (1,2,4)*)
+inputData=Drop[#,{4}]&/@inputData;
+inputData=Drop[#,{1,2}]&/@inputData;
+
+(*delete the prepended path, leaves the plain file name*)
+fileNames=StringReplace[fileNames,___~~"\\"->""];
+
+(*Pack all acquired data in a list/"data container"*)
+dataContainer={inputData,folderNames2,fileCount,cellPerGenotype,selectionTable,outputFolder,fileNames,cellsPerFile};
+),
+(
+Print[subFolder <>": doesn\.b4t match requirements: At least 1 genotype folder with 2 or more files - genotype folders with only 1 file are excluded!"];
+dataContainer={};
+)];
+
+(*return loaded data*)
+dataContainer
+]
+
+(*Cell level analysis*)
+
+(*this function starts the analysis on cell level, which means each detected cell object is one data-point in the visualisation and representation. The parameter is defined by x; depending on single branch and GFP different subfunctions are executed*)
+singleObjectAnalysis[dataContainer_,x_,gfp_,singleBranch_]:=
+Module[{singleData,selectionTable,type1,rawData,tableData, unit,unitNormal,unitSingleBranch},
+
+(*define the unit for each parameter - need to match with the detection-script and the excel files. Define the unit based on x, the processed parameter*)
+unitNormal={"","[\[Micro]m\.b2]","[\[Micro]m]","","[\[Micro]m]","[\[Micro]m]","[\[Micro]m]","[\[Micro]m]","[\[Micro]m]","[\[Micro]m]","","","","[\[Micro]m]","","[\[Micro]m]","[%]",""};
+unitSingleBranch ={"","","[\[Micro]m]","[\[Micro]m]","","","","","[\[Micro]m\.b2]","[\[Micro]m\.b2]"};
+unit = If[singleBranch==True,unitSingleBranch[[x]],unitNormal[[x]]];
+
+(*returns the data of the parameter "x", for singleBranch-files another loading function is used. The loading functions are necessary because single branch and GFP data needs further pre-procssing before they can be visualized.*)
+If[singleBranch==True,singleData=loadSingleBranchData[dataContainer,gfp,x],singleData=loadsingleData[dataContainer,gfp,x]];
+
+(*build a new nested list - values are divided in the original file partition; so all values of one file are placed in one sub-list. Later used to save it in an excel file containing the raw data. For GFP it\.b4s done below.*)
+If[gfp==False,rawData= FoldPairList[TakeDrop,singleData[[1]] ,singleData[[8]]]];
+
+(*build a new nested list; values are divided by genotype/GFP-signal*)
+singleData[[1]]= FoldPairList[TakeDrop,singleData[[1]] ,singleData[[4]]];
+
+(*build a new nested list - all values of one file are placed in one sub-list and additionally in the GFP-subgroup*)
+If[gfp==True,rawData= Table[FoldPairList[TakeDrop,singleData[[1,i]] ,singleData[[9,i]]],{i,1,Length[singleData[[9]]]}]];
+
+(*get selection table*)
+selectionTable=singleData[[5]];
+
+(*adjust type1 (later used for file naming)*)
+If[singleBranch==True,type1="single_branch_analysis",type1="cell_level"];
+If[gfp==True,type1=type1<>"_GFP-based"];
+
+(*forward data to the visualise function*)
+If[gfp==True&&singleBranch==True &&x==8,,
+dataVisualise[singleData,type1,ToString[x]<>"_"<>selectionTable[[x]],"",gfp,singleBranch,unit]];
+
+(*output the raw data as an excel file*)
+If[gfp==False,
+(
+(*transpose is used to transform the row into a column form:
+https://mathematica.stackexchange.com/questions/42820/how-to-transpose-unequal-lists ;
+the header (filenames) is included (website last visited: 11. Nov 2021 - 4:04 p.m.)*)
+tableData=Join[{singleData[[7]]},Transpose@PadRight[rawData,Automatic,""]];
+(*export the raw datatable as an excel-file*)
+Export[singleData[[6]]<>"/"<>ToString[x]<>"_"<>selectionTable[[x]]<>"_GFP-"<>ToString[gfp]<>"_singleBranch-"<>ToString[singleBranch]<>"_rawData.xlsx",tableData,"XLSX"];
+)];
+
+If[gfp==True&&singleBranch==False || gfp==True&&singleBranch==True &&x==5,
+(
+(*for GFP data an own excel sheet is created for each subgroup*)
+tableData=Table[Join[{singleData[[7]]+singleData[[2,i]]},Transpose@PadRight[rawData[[i]],Automatic,""]],{i,1,Length[singleData[[9]]]}];
+Export[singleData[[6]]<>"/"<>ToString[x]<>"_"<>selectionTable[[x]]<>"_GFP-"<>ToString[gfp]<>"_singleBranch-"<>ToString[singleBranch]<>"_rawData.xlsx",Table[singleData[[2,i]]->tableData[[i]],{i,1,Length[singleData[[9]]]}],"XLSX"];
+),
+(*special case for GFP and single branch positive files and x\[NotEqual]5: only the GFP mixed group is relevant, so we only show this subgroup and exclude the other ones*)
+ If [gfp==True&&singleBranch==True,
+(
+tableData=Join[{singleData[[7]]+singleData[[2,2]]},Transpose@PadRight[rawData[[2]],Automatic,""]];
+Export[singleData[[6]]<>"/"<>ToString[x]<>"_"<>selectionTable[[x]]<>"_GFP-"<>ToString[gfp]<>"_singleBranch-"<>ToString[singleBranch]<>"_rawData.xlsx",singleData[[2,2]]->tableData,"XLSX"];
+)
+];
+];
+
+]
+
+(*Cell level analysis with cut off*)
+
+(*this function starts the analysis on cell level with a predefined cut off value, which means each detected cell object is one data-point in the visualisation and representation and values larger than the cut off are excluded. The parameter is defined by x; depending on single branch and GFP different subfunctions are executed*)
+singleObjectAnalysisCutoff[dataContainer_,x_,gfp_,singleBranch_,cutoff_] :=
+Module[{singleData,cellCount2,selectionTable,type1, unit,unitNormal,unitSingleBranch},
+
+(*define the unit for each parameter - need to match with the detection-script and the excel files. Define the unit based on x, the processed parameter*)
+unitNormal={"","[\[Micro]m\.b2]","[\[Micro]m]","","[\[Micro]m]","[\[Micro]m]","[\[Micro]m]","[\[Micro]m]","[\[Micro]m]","[\[Micro]m]","","","","[\[Micro]m]","","[\[Micro]m]","[%]",""};
+unitSingleBranch ={"","","[\[Micro]m]","[\[Micro]m]","","","","","[\[Micro]m\.b2]","[\[Micro]m\.b2]"};
+unit = If[singleBranch==True,unitSingleBranch[[x]],unitNormal[[x]]];
+
+(*returns the data of the parameter "x", for singleBranch-files another loading function is used. The loading functions are necessary because single branch and GFP data needs further pre-procssing before they can be visualized.*)
+If[singleBranch==True,singleData=loadSingleBranchData[dataContainer,gfp,x],singleData=loadsingleData[dataContainer,gfp,x]];
+
+(*new cell count per file is computed based on the cut off. List is nested by genotype; Total returns the new cell count/single branch count*)
+cellCount2= Boole[#>= 0 && #<=cutoff] &/@singleData[[1]];
+singleData[[4]] = Map[Total,FoldPairList[TakeDrop,cellCount2,singleData[[4]]]];
+
+(*select values based on the cut off. List is nested to be divided by genotype/GFP-type*)
+singleData[[1]]=Cases[singleData[[1]],y_/;0<=y<=cutoff];
+singleData[[1]]=FoldPairList[TakeDrop,singleData[[1]],singleData[[4]]];
+
+(*get selection table*)
+selectionTable=singleData[[5]];
+
+(*adjust type1 (later used for file naming)*)
+If[singleBranch==True,type1="single_branch_analysis",type1="cell_level"];
+If[gfp==True,type1=type1<>"_GFP-based"];
+
+(*forward data to the visualise function*)
+dataVisualise[singleData,type1,ToString[x]<>"_"<>selectionTable[[x]],"_cutoff_"<>ToString[cutoff],gfp,singleBranch,unit];
+]
+
+(*File level analysis*)
+
+(*this function starts the analysis on file level, which means only the mean value of all detected cells is used, each data-point in the visualisation represents one file. The parameter is defined by x; the function loads the summery row with the mean values; based on a cut off value files with fewer cells can be excluded*)
+fileMeanAnalysis[dataContainer_,x_,cutoff_] :=
+Module[{dataCon,fileData,fileCount2,selectionTable, unit,unitNormal},
+
+(*define the unit for each parameter - need to match with the detection-script and the excel files. Define the unit based on x, the processed parameter*)
+unitNormal={"","[\[Micro]m\.b2]","[\[Micro]m]","","[\[Micro]m]","[\[Micro]m]","[\[Micro]m]","[\[Micro]m]","[\[Micro]m]","[\[Micro]m]","","","","[\[Micro]m]","","[\[Micro]m]","[%]",""};
+unit = unitNormal[[x]];
+
+(*create new object; we can\.b4t manipulate the input object*)
+dataCon=dataContainer;
+
+(*pick the summery line (mean values) of all files*)
+fileData=dataCon[[1,All,1]];
+
+(*new file count is computed based on the cut off. List is nested by genotype; Total returns the new file count*)
+fileCount2= Boole[#>=cutoff] &/@fileData[[All,1]];
+dataCon[[3]] = Map[Total,FoldPairList[TakeDrop,fileCount2,dataCon[[3]]]];
+
+(*data is selected based on the cut off*)
+fileData=Select[fileData,First[#]>=cutoff&];
+
+(*new cell count per file is computed - necessary when files are excluded with the defined cut off *)
+dataCon[[4]] = Round[Map[Total,FoldPairList[TakeDrop,fileData[[All,1]],dataCon[[3]] ]]];
+
+(*data is nested by genotype*)
+dataCon[[1]]=FoldPairList[TakeDrop,fileData[[All,x]],dataCon[[3]] ];
+
+(*get selection table*)
+selectionTable=dataCon[[5]];
+
+(*forward data to the visualice function*)
+dataVisualise[dataCon,"file_level",ToString[x]<>"_"<>selectionTable[[x]],"_"<>ToString[cutoff] <>"_cells minimal per file",False,False,unit];
+]
+
+(*Helper function: reformat cell object data*)
+
+(*this helper function picks the requested parameter in the whole dataset and reformats the data, especially needed for GFP-data. Function for cell object data*)
+loadsingleData[dataContainer_,gfp_,x_]:=
+Module[{singleData,trueList,falseList,dataCon,lengthtrueListDivied,lengthfalseListDivied},
+
+(*create new object; we can\.b4t manipulate the input object*)
+dataCon=dataContainer;
+
+(*delete the first line of each data table - contains the mean-values*)
+singleData =Drop[#,{1}]&/@dataCon[[1]];
+
+(*for GFP analysis the data values are sorted in 2 groups: GFP positive and negative (instead of subgrouping by genotype)*)
+If[gfp==True,
+(
+(*select the requested parameter x for all cells with GFP true. Also, the number of cells with GFP true is calculated. CAVE: list pointer 15 is hardcoded, when changing the xlsx-structure and the GFP column is moved, the value needs to be adjusted*)
+trueList=Map[ Select[#[[15]]==True&],singleData,{1}];
+trueList=trueList[[All,All,x]];
+lengthtrueListDivied=Map[Length,trueList];
+
+(*same for the GFP false cells*)
+falseList=Map[ Select[#[[15]]==False&],singleData,{1}];
+falseList=falseList [[All,All,x]];
+lengthfalseListDivied=Map[Length,falseList];
+
+(*join both lists; folder names/genotype, filecount and cellcount needs to be adjusted. The list with the number of GFP + or - elements in each file is appended to the list*)
+dataCon[[1]]=Join[trueList,falseList]//Flatten;
+dataCon[[2]]={"GFP True","GFP False"};
+dataCon[[3]]={Total[dataCon[[3]]],Total[dataCon[[3]]]}//Flatten;
+dataCon[[4]]={Length[trueList//Flatten],Length[falseList//Flatten]};
+dataCon=Join[dataCon,{{lengthtrueListDivied,lengthfalseListDivied}}];
+),
+(
+(*When the normal analysis mode is requested, the list is flattened (not divided by genotype anymore) and the parameter x is picked*)
+singleData= Flatten[singleData,1];
+dataCon[[1]]=singleData [[All,x]];
+)
+];
+
+(*return new data container*)
+dataCon
+]
+
+(*Helper function: reformat single branch data*)
+
+(*this helper function picks the requested parameter in the whole dataset and reformats the data, especially needed for GFP-data. Function for single branch data*)
+loadSingleBranchData[dataContainer_,gfp_,x_]:=
+Module[{singleData,trueList,falseList,dataCon,mixedList,LengthfalseListDivied,LengthtrueListDivied,LengthmixedListDivied},
+
+(*create new object; we can\.b4t manipulate the input object*)
+dataCon=dataContainer;
+
+(*delete the first line of each data table - contains the mean-values*)
+singleData =Drop[#,{1}]&/@dataCon[[1]];
+
+(*for GFP analysis the data values are sorted in the 3 groups: GFP false/false; true/false; true/true (instead of subgrouping by genotype). Since this function uses the single branch data, the GFP information is provided by the neighbour cells of each branch. Only branches with 2 detected neighbours are used for later analysis*)
+If[gfp==True,
+(
+(*select the requested parameter x for all branches with GFP combination {False, False}. For x=5 (R-indices) we want to remove negative values from the lists. Also, the number of branches with GFP {False, False} is calculated (needed for raw data export). CAVE: list pointer 7 is hardcoded, when changing the xlsx-structure and the GFP column is moved, the value needs to be adjusted
+https://mathematica.stackexchange.com/questions/185091/how-to-use-select-for-a-specific-nested-list-level
+https://mathematica.stackexchange.com/questions/16161/remove-1-values-from-a-list 
+(websites last visited: 11. Nov 2021 - 4:06 p.m.)*)
+falseList =Map[ Select[#[[7]]=="{False, False}"&],singleData,{1}];
+If[x==5,falseList=Pick[#,UnitStep@#,1]&@falseList[[All,All,x]],falseList=falseList[[All,All,x]]];
+LengthfalseListDivied=Map[Length,falseList];
+
+(*same as above for {True, True}*)
+trueList =Map[ Select[#[[7]]=="{True, True}"&],singleData,{1}];
+If[x==5,trueList=Pick[#,UnitStep@#,1]&@trueList[[All,All,x]],trueList=trueList[[All,All,x]]];
+LengthtrueListDivied=Map[Length,trueList];
+
+(*same as above for {True, False}*)
+mixedList =Map[ Select[#[[7]]=="{True, False}"||#[[7]]=="{False, True}"&],singleData,{1}];
+If[x==5,mixedList=Pick[#,UnitStep@#,1]&@mixedList[[All,All,x]],mixedList=mixedList[[All,All,x]]];
+LengthmixedListDivied=Map[Length,mixedList];
+
+(*join all lists; folder names/genotype, filecount and cellcount needs to be adjusted. The list with the number of branches in each subgroup and file is appended to the list*)
+dataCon[[1]]=Join[falseList,mixedList,trueList]//Flatten;
+dataCon[[2]]={"GFP false","GFP mixed","GFP true"};
+dataCon[[3]]={Total[dataCon[[3]]],Total[dataCon[[3]]],Total[dataCon[[3]]]}//Flatten;
+dataCon[[4]]={Length[falseList//Flatten],Length[mixedList//Flatten],Length[trueList//Flatten]};
+dataCon=Join[dataCon,{{LengthfalseListDivied,LengthmixedListDivied,LengthtrueListDivied}}];
+),
+(
+(*When the normal analysis mode is requested, the list is flattened (not divided by genotype anymore) and the parameter x is picked*)
+singleData= Flatten[singleData,1];
+dataCon[[1]]=singleData [[All,x]];
+)
+];
+
+(*return new data container*)
+dataCon
+]
+
+(*Visualisation function*)
+
+(*this helper function will create visualisations (histogram, cloud plot) and perform a statistical analysis of the input dataset; the results are saved in an PDF file.
+type1: analysis type (object or file level), type2: parameter (e.g. area), suffix: special features (e.g. cut off apllied), gfp/singleBranch: define settings used; unit: unit of the parameter*)
+dataVisualise[dataContainer_,type1_,type2_,suffix_,gfp_,singleBranch_,unit_]:=
+Module[{kombi,tab1,tab2,tabData,statGrid,histo,outputarray, table,results,fileName,dataVis,folderNames,fileCount,objectCount,totalfolderCount,tabHeader,text,outputPath, sortingList, dataVis2,folderNames2,dataVisSpreading,cloudPlot,cloudPlot2,color,f},
+
+(*unpack container into individual variables*)
+dataVis=dataContainer[[1]];
+folderNames=dataContainer[[2]];
+fileCount = dataContainer[[3]];
+objectCount = dataContainer[[4]];
+outputPath=dataContainer[[6]];
+
+(*these first steps run a statistical analysis on the dataset to output a few key parameters that should help evaluate the genotype differences*)
+(*returns a list with all possible genotype pairs in our data*)
+kombi=DeleteDuplicates[Map[Sort,Permutations[Range[1,Length[dataVis]],{2}]]]//Flatten;
+
+(*disable error display: avoids division by 0 errors; the table shows "Indeterminate" instead*)
+Off[Power::infy];
+
+(*the combinations are used to perform a simple statistical comparisons*)
+tab1=Table[LocationTest[{dataVis[[kombi[[i]]]],dataVis[[kombi[[i+1]]]]},Automatic,{"TestDataTable",All}],{i,1,Length[kombi],2}];
+
+(*enable error display*)
+On[Power::infy];
+
+(*labelling for the statistic results table*)
+tab2=Table[{folderNames[[kombi[[i]]]]<>" / "<>folderNames[[kombi[[i+1]]]]},{i,1,Length[kombi],2}];
+
+(*merge both tables and add header; visualisation via Grid function*)
+tabData=Partition[Flatten[Riffle[tab2,tab1]],2];
+tabData=Prepend[tabData,{"compared groups","statistic"}];
+statGrid=Grid[tabData,Alignment->Left,Spacings->{2,2},Frame->All,ItemStyle->"Text",BaseStyle->{FontSize->8},Background->{{LightGray,None},{Gray,None}}];
+
+(* the next steps create two visualisations of the dataset, first a so-called cloud plot and a smooth histogram*)
+(* the dataVis list and folderNames are sorted, based on the mean values; https://mathematica.stackexchange.com/questions/7679/sort-lists-according-to-the-order-of-another (website last visited: 11. Nov 2021 - 4:08 p.m.)*)
+sortingList={Map[Mean,dataVis],dataVis,folderNames};
+sortingList=SortBy[sortingList\[Transpose],First]\[Transpose];
+dataVis2=sortingList[[2]];
+folderNames2=sortingList[[3]];
+
+(*to show each data point in the cloud plot each value needs an x-value, which defines the position. We chose these values based on a normal distribution to archive a harmonic visualisation. Otherwise, all points will be shown on a line (and not as a point cloud). For the later boxPlot rectangle the x-values need to be limited in the range of the box, which is done with the additional function *)
+f[x_,i_]:=If[x>(2*i-0.6) || x<(2*i-1.4),RandomReal[{2*i-1.4,2*i-0.6}],x];
+dataVisSpreading=Table[Transpose[{f[#,i]&/@RandomVariate[NormalDistribution[(i*2-1),0.20],Length[dataVis2[[i]]]],dataVis2[[i]]}],{i,Length[dataVis2]}];
+
+(*show the cloud plot, Ticks and Plotrange are dependent on the number of input folders*)
+cloudPlot=ListPlot[dataVisSpreading,PlotRange->{{0,Length[folderNames2]*2},{If[Min[dataVis2]>0,0,Min[dataVis2]*1.2],Max[dataVis2]*1.2}},
+Ticks->{Table[{i*2-1,folderNames2[[i]]},{i,Length[folderNames2]}],Automatic},BaseStyle->{FontWeight->"Normal",FontSize->16},LabelStyle->Directive[Black,Normal],AxesLabel->unit,ImageSize->400];
+
+(*define the colour scheme, 97= default; add additional colours from other colour schemes - necessary for larger datasets*)
+color=Join[ColorData[97,"ColorList"],ColorData[98,"ColorList"],ColorData[99,"ColorList"]];
+
+(*add boxplot features to the cloudPlot, reactangle showing the 25-75% quartile range and a line showing the mean value, colour based on the default colour*)
+cloudPlot2=Show[cloudPlot,Table[Graphics[{Black,Thickness[0.006],Line[{{-1.6+i*2,sortingList[[1,i]]},{-0.4+i*2,sortingList[[1,i]]}}],Opacity[0.4],color[[i]],Thick,EdgeForm[{Thin,Black}],Rectangle[{i*2-1.5,Quantile[dataVis2[[i]],0.25]},{i*2-0.5,Quantile[dataVis2[[i]],0.75]}]
+}],{i,Length[folderNames2]}]];
+
+(*function the show a smoothed histogram*)
+histo=SmoothHistogram[dataVis2,PlotLegends-> folderNames2,AxesLabel->{unit,""},ImageSize->400];
+
+(*assemble an array for outputting key parameter of the visualised dataset; header and fileCount are adapted to match the different settings*)
+If[gfp==True,(totalfolderCount=Max[fileCount];fileCount=fileCount/._Integer:>"-";),totalfolderCount=Total[fileCount]];
+outputarray= {folderNames,fileCount,objectCount,Map[Mean,dataVis]}~Flatten~{2,1};
+If[singleBranch==True,tabHeader={"genotyp","# files", "# branches",type2<>" mean"},tabHeader={"genotyp","# files", "# cells",type2<>" mean"}];
+
+(*add header and summery row to the table and divide the list into sub-lists to display the table*)
+outputarray= Prepend[outputarray,tabHeader] //Flatten;
+outputarray = Append[outputarray,{"total",totalfolderCount,Total[objectCount],Mean[sortingList[[1]]]}]//Flatten;
+outputarray = Partition[outputarray,4];
+
+(*visualise outputarray via Grid function*)
+table=Grid[outputarray,Alignment->Left,Spacings->{2,1},Frame->All,ItemStyle->"Text",Background->{{Gray,None},{LightGray,None}},BaseStyle->{FontSize->8}];
+
+(*text for file headline*)
+text=type1<>" - "<>type2 <>suffix;
+
+(*create output with the two tables und two graphs*)
+results=Column[{text,histo,cloudPlot2,table,statGrid},Center,ItemSize->{Automatic,14},ItemStyle->{1->Large}];
+
+(*construct filename and export the PDF file*)
+fileName=outputPath<>"/"<>type1<>"_"<> type2<>suffix<>".pdf";
+Export[fileName,results];
+]
+
+(*Execution functions*)
+
+(*the different types (GFP +/-, singlebranch +/-) need to be executed with slightly different settings (since not all types of sub analysis are possible and the input excel files are built differently with different parameters). The run-function will choose adequate types of subfunctions depending on the user input.*)
+runNormal[dataContainer_,fileMeanCutoff_,gfp_,singleBranch_]:=Module[{range},
+
+(*for single branch files only a few parameters are relevant (5:R-index), for single branch GFP files the segment orientation und enclosed area can also be visualised. For non single branch files a wider range of parameters is available*)
+If[singleBranch==True && gfp==True,range={5,8,10},If[singleBranch==True && gfp==False,range={5},range={1,2,3,4,5,6,7,8,9,10,11,12,14,16,17}]];
+
+(*run the cell level analysis for each container (each data_input folder) and the predefined parameters (range)*)
+Table[singleObjectAnalysis[dataContainer[[d]],i,gfp,singleBranch],{d,Length[dataContainer]},{i,range}];
+
+(*run the file level analysis - only available when single branch and GFP is "False"*)
+If[singleBranch==False &&gfp==False,Table[fileMeanAnalysis[dataContainer[[d]],i,fileMeanCutoff],{d,Length[dataContainer]},{i,range}];]
+]
+
+(*run the cut off analysis on the user defined parameter and cut off value. Mostly used for R-index.*)
+runCutoff[dataContainer_,outliersCutoff_,outliersVariable_,gfp_,singleBranch_]:=Module[{},
+Table[singleObjectAnalysisCutoff[dataContainer[[d]],outliersVariable,gfp,singleBranch,outliersCutoff],{d,Length[dataContainer]}];
+]
+
+Run
+1. Quit all Mathematica kernels
+In[27]:= Quit[]
+2. Define settings
+In[90]:= (*define whether the xlsx-files were generated with singleBranch and/or gfp settings in the ZO-1 detection script*)
+(*default: False, False*)
+gfp=False;
+singleBranch = False;
+
+(*define the cut off that will be used for file mean analysis (only executed when GFP and single branch false). Files with fewer cells than the defined cut off will be removed from the analysis*)
+(*default: 0*)
+fileMeanCutoff = 0;
+
+(*define the cut off that will be used for cut off analysis. Values greater will be removed from in the analysis. The parameter for this type of analysis needs to be defined, too.*)
+(*default: 25, 17 for normal files; 25, 5 for single branch files*)
+outliersCutoff= 25;
+outliersParameter= 17;
+3. Localisation of data files
+In[139]:= (*set working directory and search for all "data_input" subfolders. Call loadFiles function to create dataContainers that contain the data of all found excel files*)
+SetDirectory[NotebookDirectory[]];
+folder=Select[FileNames["*","",Infinity],DirectoryQ];
+folder=Select[folder,StringMatchQ[#,"*data_input"]&];
+dataContainer=Table[loadFiles[folder[[i]]]/. {}-> Nothing,{i,Length[folder]}];
+"Folders found for processing: "<>ToString[Length[dataContainer]]
+4. Processing - normal mode
+In[153]:= runNormal[dataContainer,fileMeanCutoff,gfp,singleBranch];
+
+5. Processing - cut off mode
+In[81]:= runCutoff[dataContainer,outliersCutoff,outliersParameter,gfp,singleBranch];
