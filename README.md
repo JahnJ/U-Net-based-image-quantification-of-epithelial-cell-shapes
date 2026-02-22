@@ -16,4 +16,4 @@ For more detailed information on the methods and the theoretical background plea
 • Fiji ImageJ 1.53b + Java 1.8.0_212 + U-Net Plugin v20190926220201
 
 
-• Mathematica 12.0
+• Mathematica 12.0 or newer
